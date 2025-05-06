@@ -21,7 +21,7 @@ Optional sensors (e.g., MPU6050 IMU) may be integrated to support wrist analysis
 
 - 📷 **Pose Detection:** Full upper-body motion tracking using computer vision
 - 🖐️ **Wrist Flick Analysis:** Detects shooting form and wrist motion (via CV or fallback IMU)
-- 🦘 **Jump Detection:** Recognizes jump timing and elevation for shot power estimation
+- ⬆️ **Jump Detection:** Recognizes jump timing and elevation for shot power estimation
 - 🔊 **Real-Time Audio Feedback:** Sent via Bluetooth to headphones or speaker
 - 🔁 **Sensor Integration (Optional):** Adds IMU data for more accurate wrist detection if needed
 
