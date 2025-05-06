@@ -31,7 +31,7 @@ Optional sensors (e.g., MPU6050 IMU) may be integrated to support wrist analysis
 - Solo basketball training without a coach
 - Continuous shot correction via voice instructions
 - Helps identify mistakes like:
-  - Poor elbow position
+  - Poor torso movement 
   - No jump or late jump
   - Arm angle or shoulder misalignment
 - CV system acts as a **virtual coach** guiding form improvement
