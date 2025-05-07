@@ -44,9 +44,12 @@ Optional sensors (e.g., MPU6050 IMU) may be integrated to support wrist analysis
 |------------------|---------------------------------------------|
 | **OpenCV + MediaPipe** | Pose estimation and motion tracking     |
 | **Python**        | Core programming language                   |
+| **Smart Phone**        | Video recoding                        |
 | **Bluetooth Audio** | Audio output for real-time feedback       |
 | **MPU6050 (optional)** | Extra motion sensing for wrist accuracy |
+| **ADA2168  (optional)** | IR Break Beam Sensor basket detection |
 | **ESP32 (optional)** | Microcontroller for sensor data (if used) |
+
 
 ---
 
