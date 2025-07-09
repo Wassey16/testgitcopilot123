@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jump Monitoring</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #1b1b1b; /* Black background */
+            margin: 0;
+            padding: 20px;
+            color: #f4f4f4; /* Light text */
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #333; /* Dark gray container */
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+        }
+        h1 {
+            color: #f4f4f4;
+            text-align: center;
+            border-bottom: 3px solid #c42f48; /* Maroon red underline */
+            padding-bottom: 10px;
+        }
+        .log {
+            border: 1px solid #c42f48; /* Maroon red border */
+            padding: 10px;
+            margin-top: 20px;
+            background: #222; /* Black background */
+            max-height: 400px;
+            overflow-y: auto;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+        }
+        .log-item {
+            margin-bottom: 5px;
+            font-size: 14px;
+            color: #f4f4f4; /* Light text */
+        }
+        table {
+            width: 100%;
+            margin-top: 20px;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 10px;
+            border: 1px solid #c42f48; /* Maroon red border */
+            text-align: center;
+        }
+        th {
+            background-color: #c42f48; /* Maroon red background */
+            color: #f4f4f4; /* White text */
+            font-weight: bold;
+        }
+        td {
+            background-color: #333; /* Dark gray cell */
+            color: #f4f4f4; /* Light text */
+        }
+        .download-button, .score-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background-color: #c42f48; /* Maroon red button */
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            text-align: center;
+            cursor: pointer;
+        }
+        .download-button:hover, .score-button:hover {
+            background-color: #a52238; /* Darker maroon red */
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Jump Monitoring</h1>
+        <div id="log" class="log"></div>
+        <table id="rawDataTable">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>FSR1</th>
+                    <th>FSR2</th>
+                    <th>Ax</th>
+                    <th>Ay</th>
+                    <th>Az</th>
+                    <th>Gx</th>
+                    <th>Gy</th>
+                    <th>Gz</th>
+                    <th>Shot Classifier</th>
+                    <th>Scored</th> <!-- Added column for Score -->
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        <a id="downloadCsvButton" class="download-button">Download Data as CSV</a> <!-- Added CSV download button -->
+        <button id="scoreButton" class="score-button">Did You Score?</button> <!-- Added Score button -->
+    </div>
+
+    <script>
+        const logContainer = document.getElementById('log');
+        const rawDataTable = document.getElementById('rawDataTable').querySelector('tbody');
+        const downloadCsvButton = document.getElementById('downloadCsvButton');
+        const scoreButton = document.getElementById('scoreButton');
+        let csvData = []; // Store all data for CSV export
+        let lastShotData = null; // Store the last shot data temporarily
+
+        function appendLog(message) {
+            const logItem = document.createElement('div');
+            logItem.className = 'log-item';
+            logItem.textContent = message;
+            logContainer.appendChild(logItem);
+        }
+
+        function generateCsv(data) {
+            const headers = ["Timestamp", "FSR1", "FSR2", "Ax", "Ay", "Az", "Gx", "Gy", "Gz", "Shot Classifier", "Scored"];
+            const rows = data.map(row => 
+                `${row.ts},${row.fsr1},${row.fsr2},${row.ax},${row.ay},${row.az},${row.gx},${row.gy},${row.gz},${row.classification || "N/A"},${row.scored || "N/A"}`
+            );
+            return [headers.join(","), ...rows].join("\n");
+        }
+
+        downloadCsvButton.addEventListener('click', () => {
+            const csvContent = generateCsv(csvData);
+            const blob = new Blob([csvContent], { type: "text/csv" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "jump_data.csv";
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        scoreButton.addEventListener('click', () => {
+            if (!lastShotData) {
+                appendLog("No shot data available to score.");
+                return;
+            }
+            const score = confirm("Did you score this shot?");
+            const scored = score ? "Yes" : "No";
+            lastShotData.scored = scored; // Update the last shot data with the score
+            appendLog(`Shot manually recorded as: ${scored}`);
+            ws.send(scored.toLowerCase()); // Send scored message to WebSocket
+
+            // Add the last shot data to the CSV data and update the table
+            csvData.push(lastShotData);
+            rawDataTable.innerHTML += `
+                <tr>
+                    <td>${lastShotData.ts}</td>
+                    <td>${lastShotData.fsr1}</td>
+                    <td>${lastShotData.fsr2}</td>
+                    <td>${lastShotData.ax}</td>
+                    <td>${lastShotData.ay}</td>
+                    <td>${lastShotData.az}</td>
+                    <td>${lastShotData.gx}</td>
+                    <td>${lastShotData.gy}</td>
+                    <td>${lastShotData.gz}</td>
+                    <td>${lastShotData.classification || "N/A"}</td>
+                    <td>${scored}</td> <!-- Display the score -->
+                </tr>
+            `;
+
+            lastShotData = null; // Reset after scoring
+        });
+
+        const ws = new WebSocket("ws://localhost:8000/ws");
+
+        ws.onmessage = (event) => {
+            const data = event.data;
+            try {
+                const parsed = JSON.parse(data);
+
+                // Display summary
+                appendLog("Jump Summary:");
+                appendLog(`- Jump Start Timestamp: ${parsed["Jump Start Timestamp"]}`);
+                appendLog(`- Jump End Timestamp: ${parsed["Jump End Timestamp"]}`);
+                appendLog(`- Peak Vertical Acceleration (az): ${parsed["Peak Vertical Acceleration (az)"]}`);
+                appendLog(`- Jump Duration (s): ${parsed["Metrics"]["Jump Duration (s)"]}`);
+                appendLog(`- Jump Height (m): ${parsed["Metrics"]["Jump Height (m)"]}`);
+                appendLog(`- Max FSR Values (Finger 1 & 2): ${parsed["Metrics"]["Max FSR Values (Finger 1 & 2)"]}`);
+                
+                // Display raw glove data in table
+                rawDataTable.innerHTML = "";
+                csvData = []; // Reset CSV data for new jump session
+
+                parsed["Raw Glove Data During Jump"].forEach(row => {
+                    const shotClassifier = row.classification || "N/A"; // Use classification if available
+                    rawDataTable.innerHTML += `
+                        <tr>
+                            <td>${row.ts}</td>
+                            <td>${row.fsr1}</td>
+                            <td>${row.fsr2}</td>
+                            <td>${row.ax}</td>
+                            <td>${row.ay}</td>
+                            <td>${row.az}</td>
+                            <td>${row.gx}</td>
+                            <td>${row.gy}</td>
+                            <td>${row.gz}</td>
+                            <td>${shotClassifier}</td>
+                            <td>N/A</td> <!-- Default score value -->
+                        </tr>
+                    `;
+
+                    lastShotData = {
+                        ts: row.ts,
+                        fsr1: row.fsr1,
+                        fsr2: row.fsr2,
+                        ax: row.ax,
+                        ay: row.ay,
+                        az: row.az,
+                        gx: row.gx,
+                        gy: row.gy,
+                        gz: row.gz,
+                        classification: shotClassifier,
+                        scored: "N/A" // Default score
+                    };
+                });
+            } catch {
+                appendLog(data);
+            }
+        };
+
+        ws.onclose = () => {
+            appendLog("WebSocket connection closed.");
+        };
+
+        ws.onerror = (error) => {
+            appendLog("WebSocket error occurred.");
+        };
+    </script>
+</body>
+</html>

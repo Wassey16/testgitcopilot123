@@ -1,119 +1,131 @@
-import json, os, time
-import eventlet
-eventlet.monkey_patch()
+from fastapi import FastAPI, WebSocket
+import asyncio
+import json
+from bleak import BleakScanner, BleakClient
 
-from flask import Flask, render_template, send_from_directory
-from flask_socketio import SocketIO
-import paho.mqtt.client as mqtt
-from dotenv import load_dotenv
+app = FastAPI()
 
-from models import init_db, Session, Shot
-from shot_classifier import Classifier
+# BLE Configuration
+DEVICE_NAMES = {
+    "foot": "ESP32_FOOT",
+    "glove": "ESP32_GLOVE"
+}
+SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+CHAR_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
-load_dotenv()
-init_db()
+# Jump Monitoring Variables
+jump_active = False
+jump_start_ts = None
+jump_end_ts = None
+peak_az = 0
+raw_glove_data = []
+max_fsr_per_finger = [0, 0]
 
-MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
-MQTT_PORT   = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER   = os.getenv("MQTT_USER")
-MQTT_PASS   = os.getenv("MQTT_PASSWORD")
+# Helper Functions
+def detect_jump_start(payload):
+    global jump_active, jump_start_ts, peak_az
+    az = payload.get("az", 0)
+    ts = payload.get("ts", 0)
 
-TOPIC_GLOVE_RAW = "basket/glove/raw"
-TOPIC_FOOT_RAW  = "basket/foot/raw"
-TOPIC_HOOP_EVENT = "basket/hoop/event"
+    if az > 20000 and not jump_active:
+        jump_active = True
+        jump_start_ts = ts
+        peak_az = az
+        return True
+    return False
 
-app = Flask(__name__, static_folder="../frontend", static_url_path="")
-socketio = SocketIO(app, cors_allowed_origins="*")
+def detect_landing(payload):
+    global jump_active, jump_end_ts
+    az = payload.get("az", 0)
+    ts = payload.get("ts", 0)
 
-classifier = Classifier()
+    if jump_active and az <= 16384:
+        jump_active = False
+        jump_end_ts = ts
+        return True
+    return False
 
+def calculate_metrics():
+    global jump_start_ts, jump_end_ts, peak_az, max_fsr_per_finger
+    jump_duration = (jump_end_ts - jump_start_ts) / 1000  # Convert milliseconds to seconds
+    jump_height = (peak_az - 16384) * 0.001 / 9.81  # Calculate jump height using physics formula
+    return {
+        "Jump Duration (s)": round(jump_duration, 2),
+        "Jump Height (m)": round(jump_height, 2),
+        "Max FSR Values (Finger 1 & 2)": max_fsr_per_finger
+    }
 
-# ============ MQTT CALLBACKS ============
-def on_connect(client, userdata, flags, rc):
-    print("MQTT connected", rc)
-    client.subscribe([(TOPIC_GLOVE_RAW, 0), (TOPIC_FOOT_RAW, 0), (TOPIC_HOOP_EVENT, 0)])
+async def summarize_jump(websocket: WebSocket):
+    global jump_start_ts, jump_end_ts, peak_az, raw_glove_data, max_fsr_per_finger
 
-
-def on_message(client, userdata, msg):
-    payload = json.loads(msg.payload.decode())
-    topic = msg.topic
-    if topic == TOPIC_GLOVE_RAW:
-        if payload.get("rel") == 1:
-            result = classifier.on_release(payload["ts"], grip_peak=payload["fsr"][0] + payload["fsr"][1] + payload["fsr"][2])
-            if result:
-                persist_and_emit(result)
-
-    elif topic == TOPIC_FOOT_RAW:
-        apex_ts = payload.get("apex", 0)
-        if apex_ts:
-            result = classifier.on_jump_apex(apex_ts)
-            if result:
-                persist_and_emit(result)
-
-    elif topic == TOPIC_HOOP_EVENT:
-        result = classifier.on_score(payload["ts"])
-        if result:
-            persist_and_emit(result)
-
-
-def persist_and_emit(data):
-    # persist to DB
-    with Session() as s:
-        shot = Shot(
-            ts_release=data["ts_release"],
-            ts_apex=data["ts_apex"],
-            classification=data["classification"],
-            scored=data["scored"],
-            grip_peak=data["grip_peak"],
-        )
-        s.add(shot)
-        s.commit()
-        payload = {
-            "id": shot.id,
-            "classification": shot.classification,
-            "scored": shot.scored,
-            "release": shot.ts_release,
-            "apex": shot.ts_apex,
+    if jump_start_ts and jump_end_ts:
+        metrics = calculate_metrics()
+        summary = {
+            "Jump Start Timestamp": jump_start_ts,
+            "Jump End Timestamp": jump_end_ts,
+            "Peak Vertical Acceleration (az)": peak_az,
+            "Metrics": metrics,
+            "Raw Glove Data During Jump": raw_glove_data
         }
-        socketio.emit("shot", payload)
-        print("Shot stored & emitted", payload)
+        await websocket.send_json(summary)
 
+    # Reset variables for next jump
+    jump_start_ts = None
+    jump_end_ts = None
+    peak_az = 0
+    max_fsr_per_finger = [0, 0]
+    raw_glove_data = []
 
-# ============ FLASK ROUTES ============
-@app.route("/")
-def root():
-    return send_from_directory(app.static_folder, "index.html")
+async def handle_notify(device_type: str, sender: int, data: bytearray, websocket: WebSocket):
+    payload = json.loads(data.decode())
 
+    if device_type == "foot":
+        if detect_jump_start(payload):
+            await websocket.send_text("Jump Started. Monitoring glove data...")
+        elif detect_landing(payload):
+            await websocket.send_text("Jump Ended.")
+            await summarize_jump(websocket)
 
-@app.route("/shots")
-def get_shots():
-    with Session() as s:
-        shots = s.query(Shot).order_by(Shot.id.desc()).limit(20).all()
-        return {
-            "shots": [
-                dict(
-                    id=sh.id,
-                    classification=sh.classification,
-                    scored=sh.scored,
-                    release=sh.ts_release,
-                    apex=sh.ts_apex,
+    elif device_type == "glove" and jump_active:
+        raw_glove_data.append(payload)
+        max_fsr_per_finger[0] = max(max_fsr_per_finger[0], payload.get("fsr1", 0))
+        max_fsr_per_finger[1] = max(max_fsr_per_finger[1], payload.get("fsr2", 0))
+
+async def connect_to_device(device_type: str, device, websocket: WebSocket):
+    try:
+        async with BleakClient(device.address) as client:
+            await websocket.send_text(f"Connected to {device_type}. Subscribing to notifications...")
+            await client.start_notify(
+                CHAR_UUID,
+                lambda sender, data: asyncio.create_task(
+                    handle_notify(device_type, sender, data, websocket)
                 )
-                for sh in shots
-            ]
-        }
+            )
+            while True:
+                await asyncio.sleep(1)
+    except Exception as e:
+        await websocket.send_text(f"[{device_type}] Connection error: {e}")
 
+async def scan_and_connect(websocket: WebSocket):
+    await websocket.send_text("Scanning for BLE devices...")
+    devices = await BleakScanner.discover(timeout=10.0)
 
-def run():
-    # MQTT Client
-    client = mqtt.Client()
-    client.username_pw_set(MQTT_USER, MQTT_PASS)
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    client.loop_start()
+    tasks = []
+    for dtype, name in DEVICE_NAMES.items():
+        dev = next((d for d in devices if d.name == name), None)
+        if dev:
+            await websocket.send_text(f"Found {dtype} device: {name} ({dev.address})")
+            tasks.append(connect_to_device(dtype, dev, websocket))
+        else:
+            await websocket.send_text(f"[Warning] Device '{name}' ({dtype}) not found.")
 
-    socketio.run(app, host="0.0.0.0", port=5000)
+    if tasks:
+        await asyncio.gather(*tasks)
 
-
-if __name__ == "__main__":
-    run()
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        await scan_and_connect(websocket)
+    except Exception as e:
+        await websocket.send_text(f"Error: {e}")
